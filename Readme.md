@@ -1741,6 +1741,41 @@ scrape_configs:
     static_configs:
     - targets: ['localhost:9090']
 ```
+## Deployment
+
+If you are working on amd64 machine (with high probability you are), then you need to build rpi images on the rpi. It is possible to build also via qemu project on amd64, but it is slower
+due to emulation layer.
+
+So create directory for docker image build on rpi, node1:  
+`$ mkdir ~/docker-builds`
+
+Add ssh keys to your Gitlab, and clone repo you want to build.
+
+Build the project:  
+`$ sudo docker build --build-arg RAILS_ENV=production -t registry.gitlab.matho.sk:5005/mathove-projekty/matho:latest .`
+
+If build passed, login, if you are not already:  
+`$ sudo docker login registry.gitlab.matho.sk:5005 -u root -p token`
+
+Before the push, it is recommended to tag the release and not use the latest tag. We will use the latest tag  
+`$ sudo docker push registry.gitlab.matho.sk:5005/mathove-projekty/matho:latest`
+
+Login to second node and do pull (I'm not sure, if it needs to be executed, or the docker pull the image automatically):  
+`$ sudo docker pull registry.gitlab.matho.sk:5005/mathove-projekty/matho:latest`
+
+Remove the project container in Portainer and deploy the rails project:  
+`$ sudo docker stack deploy --compose-file rails-projects-compose.yml rails-projects`
+
+Note: If you was previously running on Raspbian OS, like me, you need to rebuild your rpi based image to aarch64 architecture.  
+If not, you will get error running docker build, but the old images will be working ok, untill the first build.
+
+Note2: If you are running ruby < v2.3 apps, you will have issues to compile ruby with openssl on Ubuntu 20.04. So I used Ubuntu 16.04 for ruby 2.2 apps. I know, it is not secure, but it works.
+Also you will have errors with libv v3.16 gems and therubyracer. I was unable to compile the v8 on aarch64, and I strongly recommend, do not try it! You spend a lot of time. It is a lot easier to swap therubyracer gem with
+mini_racer and new libv8 version. Also you need to change execjs version to some new, to support mini_racer gem.
+
+Attention! Only some libv8 versions supports aarch64. Check on rubygems.org which one, and compare with the acceptable mini_racer version. If you are running ruby 2.2 apps, I recommend libv8 v5.9.211.38.1 (exactly this !) and mini_racer v0.1.14.  
+You dont have many possibilities. This combination works for me.
+
 ##  Summary
 Hope, you like this tutorial and I helped you a little bit :) Also there is some todo stack, which I keep at the end of this tutorial. If I find time, I will try to improve
 this tutorial continuously.
