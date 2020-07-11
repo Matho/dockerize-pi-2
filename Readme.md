@@ -1438,11 +1438,17 @@ services:
       - RAILS_MAX_THREADS=5 
     deploy:
       labels:      
-        - traefik.http.routers.gymplacisk.rule=Host(`gymplaci.sk`, `www.gymplaci.sk`) 
-        - traefik.http.services.gymplacisk-service.loadbalancer.server.port=80    
-        - traefik.docker.network=spilo_db-nw   
-#        - traefik.http.routers.gymplacisk.tls=true
-#        - traefik.http.routers.gymplacisk.tls.certresolver=le     
+        - traefik.http.middlewares.gymplacisk-redirect-web-secure.redirectscheme.scheme=https
+        - traefik.http.routers.gymplacisk.middlewares=gymplacisk-redirect-web-secure
+        - traefik.http.routers.gymplacisk.rule=Host(`gymplaci.sk`, `www.gymplaci.sk`)
+        - traefik.http.routers.gymplacisk.entrypoints=web
+      
+        - traefik.http.routers.gymplacisk-secure.rule=Host(`gymplaci.sk`, `www.gymplaci.sk`)
+        - traefik.http.routers.gymplacisk-secure.tls.certresolver=le
+        - traefik.http.routers.gymplacisk-secure.tls=true
+        - traefik.http.routers.gymplacisk-secure.entrypoints=web-secure
+        - traefik.http.services.gymplacisk-secure.loadbalancer.server.port=80
+        - traefik.docker.network=spilo_db-nw  
       replicas: 2
       
   mathosk:
@@ -1471,9 +1477,17 @@ services:
       - RAILS_ENV=production
     deploy:
       labels:      
-        - traefik.http.routers.mathosk.rule=Host(`matho.sk`, `www.matho.sk`) 
-        - traefik.http.services.mathosk-service.loadbalancer.server.port=80    
-        - traefik.docker.network=spilo_db-nw       
+        - traefik.http.middlewares.mathosk-redirect-web-secure.redirectscheme.scheme=https
+        - traefik.http.routers.mathosk.middlewares=mathosk-redirect-web-secure
+        - traefik.http.routers.mathosk.rule=Host(`matho.sk`, `www.matho.sk`)
+        - traefik.http.routers.mathosk.entrypoints=web
+      
+        - traefik.http.routers.mathosk-secure.rule=Host(`matho.sk`, `www.matho.sk`)
+        - traefik.http.routers.mathosk-secure.tls.certresolver=le
+        - traefik.http.routers.mathosk-secure.tls=true
+        - traefik.http.routers.mathosk-secure.entrypoints=web-secure
+        - traefik.http.services.mathosk-secure.loadbalancer.server.port=80
+        - traefik.docker.network=spilo_db-nw      
       replicas: 2 
       
   ecavkalnicaeu:
@@ -1502,9 +1516,17 @@ services:
       - RAILS_ENV=production
     deploy:
       labels:      
-        - traefik.http.routers.ecavkalnica.rule=Host(`ecavkalnica.eu`, `www.ecavkalnica.eu`) 
-        - traefik.http.services.ecavkalnica-service.loadbalancer.server.port=80    
-        - traefik.docker.network=spilo_db-nw       
+        - traefik.http.middlewares.ecavkalnicaeu-redirect-web-secure.redirectscheme.scheme=https
+        - traefik.http.routers.ecavkalnicaeu.middlewares=ecavkalnicaeu-redirect-web-secure
+        - traefik.http.routers.ecavkalnicaeu.rule=Host(`ecavkalnica.eu`, `www.ecavkalnica.eu`)
+        - traefik.http.routers.ecavkalnicaeu.entrypoints=web
+      
+        - traefik.http.routers.ecavkalnicaeu-secure.rule=Host(`ecavkalnica.eu`, `www.ecavkalnica.eu`)
+        - traefik.http.routers.ecavkalnicaeu-secure.tls.certresolver=le
+        - traefik.http.routers.ecavkalnicaeu-secure.tls=true
+        - traefik.http.routers.ecavkalnicaeu-secure.entrypoints=web-secure
+        - traefik.http.services.ecavkalnicaeu-secure.loadbalancer.server.port=80
+        - traefik.docker.network=spilo_db-nw    
       replicas: 2   
       
   msdc:
@@ -1533,9 +1555,17 @@ services:
       - RAILS_ENV=production
     deploy:
       labels:      
-        - traefik.http.routers.msdc.rule=Host(`moravskoslovenskydhcup.eu`, `www.moravskoslovenskydhcup.eu`) 
-        - traefik.http.services.msdc-service.loadbalancer.server.port=80    
-        - traefik.docker.network=spilo_db-nw       
+        - traefik.http.middlewares.msdc-redirect-web-secure.redirectscheme.scheme=https
+        - traefik.http.routers.msdc.middlewares=msdc-redirect-web-secure
+        - traefik.http.routers.msdc.rule=Host(`moravskoslovenskydhcup.eu`, `www.moravskoslovenskydhcup.eu`)
+        - traefik.http.routers.msdc.entrypoints=web
+      
+        - traefik.http.routers.msdc-secure.rule=Host(`moravskoslovenskydhcup.eu`, `www.moravskoslovenskydhcup.eu`)
+        - traefik.http.routers.msdc-secure.tls.certresolver=le
+        - traefik.http.routers.msdc-secure.tls=true
+        - traefik.http.routers.msdc-secure.entrypoints=web-secure
+        - traefik.http.services.msdc-secure.loadbalancer.server.port=80
+        - traefik.docker.network=spilo_db-nw      
       replicas: 2            
       
 networks:
