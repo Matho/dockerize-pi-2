@@ -1,6 +1,6 @@
 # How to run Rails apps with Docker Swarm, GlusterFS, Traefik, PostgreSQL, Patroni, Etcd, Haproxy, PgBouncer, Portainer in HA on Raspberry Pi 4
 
-Read time: 50 minutes
+Read time: 70 minutes
 
 ## Intro
 Year ago I have written article `How to run Rails apps with Docker on Raspberry Pi 4` located at
@@ -1806,13 +1806,464 @@ mini_racer and new libv8 version. Also you need to change execjs version to some
 Attention! Only some libv8 versions supports aarch64. Check on rubygems.org which one, and compare with the acceptable mini_racer version. If you are running ruby 2.2 apps, I recommend libv8 v5.9.211.38.1 (exactly this !) and mini_racer v0.1.14.  
 You dont have many possibilities. This combination works for me.
 
+## Migrate from Gitlab
+
+During the half of year of my usage, the Gitlab certificate has expired multiple times. I had a lot of issues
+with renewal of the cert and I end up with setup, where I'm unable to renew cert for Gitlab registry.
+So I have decided to migrate all my projects from self-hosted Gitlab on rpi to Gitlab, which is provided
+as benefit from Websupport hosting company. Also, it is better to have projects located outside of my cluster networks and
+on safe space. The limit of projects in Websupport Gitlab is set to 30. The problem is, that the registry feature is not activated.
+So I need another solution for hosting my private docker build images.
+
+I don't need gui for the builded images, so I have decided to use the `registry` project.
+
+Run the command
+```
+$ sudo docker info | grep 'Insecure' -B 5 -A 5
+```
+
+If you dont have setup the domain, on both nodes do:
+```
+$ sudo vim /etc/hosts 
+10.0.2.3 registry.docker.matho.sk
+```
+
+10.0.2.3 is private IP of my master node.
+
+Then allow connections on both nodes:
+```
+$ sudo ufw allow 6000
+```
+
+And setup the domain:
+```
+$ sudo vim /etc/docker/daemon.json 
+{
+"insecure-registries" : ["127.0.0.0/8", "registry.docker.matho.sk:6000"]
+}
+```
+Then
+```
+$ sudo systemctl daemon-reload
+$ sudo systemctl restart docker
+$ sudo docker info | grep 'Insecure' -B 5 -A 5
+```
+
+In the last command, you should see the registry subdomain in the output
+
+Start the registry project:
+```
+$ sudo docker run -d -p 6000:5000 --name registry registry:2
+```
+Then we will try, if the registry works by pull and push some image:
+```
+$ sudo docker pull ubuntu
+$ sudo docker image tag ubuntu registry.docker.matho.sk:6000/ubuntu:latest
+$ sudo docker push registry.docker.matho.sk:6000/ubuntu:latest
+$ sudo docker pull registry.docker.matho.sk:6000/ubuntu:latest
+```
+If everything works, we can continue.
+
+Because I'm changing the url of Gitlab, I needed to rename src in Gemfile in few of my projects.
+Then, I needed to rebuild the images with new changes and push new images to registry.
+
+For example, for ecav project:
+```
+$ sudo docker build -t registry.docker.matho.sk:6000/rpi-ruby-2.4-ubuntu-aarch64:latest .
+$ sudo docker push registry.docker.matho.sk:6000/rpi-ruby-2.4-ubuntu-aarch64:latest
+
+$ sudo docker build --build-arg RAILS_ENV=production -t registry.docker.matho.sk:6000/ecavkalnica:latest .
+$ sudo docker push registry.docker.matho.sk:6000/ecavkalnica:latest
+```
+
+I also needed to rebuild Spilo image:
+```
+$ sudo docker image tag registry.gitlab.matho.sk:5005/root/spilo:v1.6-p3_aarm64 registry.docker.matho.sk:6000/spilo:v1.6-p3_aarm64
+$ sudo docker push registry.docker.matho.sk:6000/spilo:v1.6-p3_aarm64
+```
+
+Redeploy of new images:
+```
+$ sudo docker stack deploy --compose-file rails-projects-compose.yml rails-projects
+$ sudo docker stack deploy --compose-file gitlab-compose.yml gitlab
+$ sudo docker stack deploy --compose-file spilo-compose.yml spilo
+```
+Then I have removed old containers, old images and check on 10.0.2.4 node, if new image with port 6000
+was downloaded and started.
+
+Attention! The port 6000 is not secured. Ensure, you have implemented some autentification between your nodes.  
+Maybe this article? [https://medium.com/@cnadeau_/private-docker-registry-part-2-lets-add-basic-authentication-6a22e5cd459b](https://medium.com/@cnadeau_/private-docker-registry-part-2-lets-add-basic-authentication-6a22e5cd459b)
+
+## Postgres backuping
+
+We are running in HA, so if one of the node will became corrupted, we have second node with the current
+postgres snapshot. But, what if something breaks, and both nodes will be corrupted? What if we will
+need to restore some older version of Postgres backup?
+
+So, I have implemented backuping on daily base. The script will backup the databases to separate file,
+and at the specified day. The backups will be rotated on weekly base.
+
+I tried to setup WAL-g project , but I have some issues with it. Because my Postgres cluster size is small -
+the backups has ~ 4MB, so I decided to use pg_dump to take snapshots of the database.
+
+I'm doing the backup on both nodes, and files are then stored to Gluster, which will be geo-replicated to another server.
+
+Because we want to use pg_dump utility and we don't have installed Postgres on our nodes (Postgres is in docker container),
+we need to install Postgres client package on both of nodes:
+```
+$ sudo apt-get install postgresql-client
+```
+
+This will not install the whole Postgres, but only som support commands. Then we can try to use pg_dumpall command
+to check, if the backup works. For 10.0.2.3 replace the private IP of your master node.
+```
+$ pg_dumpall -h 10.0.2.3 -U postgres > 2020_12_25_cluster_2.sql
+```
+To do some advanced backup, I'm using scripts from this page [https://wiki.postgresql.org/wiki/Automated_Backup_on_Linux](https://wiki.postgresql.org/wiki/Automated_Backup_on_Linux)
+I have copied `pg_backup.config` and `pg_backup_rotated.sh` scripts. Ensure, the `pg_backup_rotated.sh` is runnable (chmod +x)
+
+If you have setup password for Postgres, put before each call of psql or pgdump the new env
+`PGPASSWORD="$PASSWORD" `
+The PASSWORD env setup in the config file.
+
+Try to run  the script, if it works:
+```
+$ sudo ./pg_backup_rotated.sh
+```
+
+If works, setup crontab:
+```
+$ sudo crontab -e
+0 2 * * * /bin/bash /home/ubuntu/pg_backuping/pg_backup_rotated.sh 
+```
+
+## Minio installation
+
+Currently, I have ~50 GB of disk space free. It is a lot of space and I was looking for some kind of
+gui to be able upload some files with. The interesting project is Minio.
+
+It is very simple to use. Dont use the docker image, as it would be complicated to read/write to
+Gluster volume. It is simple to install without Docker.
+
+Download the aarch64 image
+```
+$ mkdir minio
+$ cd minio
+$ wget https://dl.minio.io/server/minio/release/linux-arm64/minio
+$ chmod +x minio 
+$ sudo cp minio /usr/local/bin/.
+$ sudo ufw allow 9200
+```
+
+By default, Minio is running on 9000 port. But we are using Portainer on 9000. So changing to 9200
+
+Start the Minio:
+```
+$ MINIO_ACCESS_KEY=your-access-key MINIO_SECRET_KEY=your-secret-key minio server --address :9200 /storage-pool/
+```
+Note: Remember the MINIO_ACCESS_KEY and MINIO_SECRET_KEY. This is your credentials to login via GUI
+
+Point to the GUI - open 10.0.2.3:9200 and put your MINIO_ACCESS_KEY and MINIO_SECRET_KEY credentials.
+You should be logged in to the Minio. Upload some file, check if the file is in Gluster and also if is replicated
+to another node in Gluster cluster.
+
+It is recommended to enable autostart of Minio on system start. Use the guide located at [https://github.com/minio/minio-service/tree/master/linux-systemd](https://github.com/minio/minio-service/tree/master/linux-systemd)
+
+Also, if you want Minio to be available remotely, add port forwarding to your routers.
+
+## Autobackup of GlusterFS to Amazon EC2 instance
+
+GlusterFS contain feature called Geo-Replication. More info about it can be found at [https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50](https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50)
+Via this feature, you can autobackup your data from Gluster.
+
+Go to Amazon portal and create EC2 instance. I have selected the lowest possible version - t4nano.
+It contains 512MB ram and I have selected 20GB ssd disk. Also I have created 125GB EBS volume via
+cold hdd option. It has throughput of 2/10MB per sec. After I have setup georeplication I have found
+it is very slow, so I recommend to select more performance device.
+
+After you create EC2 instance, download the pem file. Via the pem file, you are able to login to
+EC2 instance.  
+`$ ssh -i /home/martin/rpi/aws_server_credentials/aws_server.pem ubuntu@ec2.matho.sk`
+
+Then configure swapfile, for example based on this article [https://linuxize.com/post/how-to-add-swap-space-on-ubuntu-20-04/](https://linuxize.com/post/how-to-add-swap-space-on-ubuntu-20-04/)
+
+Now you need to install GlusterFS. Attention! Your Gluster version must match the version you are already
+using on your Gluster. So for me, it is v 7.6. At the time of writing (28.12.2020), in the Gluster
+ppa for Ubunut, there is v7.6 missing. So I recommend to use `dpkg-repack` unix command to export
+Gluster deb packages from your current cluster and install manually.
+
+Login to your master node in cluster, and use the dpkg-repack command. Instructions can be found at [http://manpages.ubuntu.com/manpages/hirsute/en/man1/dpkg-repack.1.html](http://manpages.ubuntu.com/manpages/hirsute/en/man1/dpkg-repack.1.html)
+
+```
+$ mkdir dpkg-repack
+$ cd dpkg-repack/
+$ sudo apt install dpkg-repack
+$ sudo dpkg-repack glusterfs-server
+$ sudo dpkg-repack glusterfs-client
+$ sudo dpkg-repack glusterfs-common
+```
+Download the extracted packages and upload to your EC2 instance. Install the packages. You need to install
+it in the correct order:
+
+```
+$ sudo dpkg -i glusterfs-common_7.6-ubuntu1~focal1_arm64.deb
+$ sudo apt-get install -f
+$ sudo dpkg -i glusterfs-client_7.6-ubuntu1~focal1_arm64.deb
+$ sudo apt-get install -f
+$ sudo dpkg -i glusterfs-server_7.6-ubuntu1~focal1_arm64.deb
+$ sudo apt-get install -f
+```
+Start the Gluster on EC2 node and allow it to autostart on system startup
+```
+$ sudo systemctl start glusterd.service
+$ sudo systemctl enable glusterd.service
+```
+
+Then you need to mount the EBS volume (disk) to your system. The instructions can be found at
+[https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html)
+This instructions was for my device, your device will have different uuid and dev point
+```
+$ sudo file -s /dev/nvme1n1
+$ sudo mkfs -t ext4 /dev/nvme1n1 # using ext4 instead of XfS
+$ sudo mkdir /ebs-disk
+$ sudo mount /dev/nvme1n1 /ebs-disk
+```
+
+Now setup the fstab to be the disk automouted after restart
+```
+$ sudo cp /etc/fstab /etc/fstab.orig
+```
+Add:
+```
+/dev/nvme1n1: UUID="7c723d58-d9e3-44a0-9eb3-a6de7dc95ffc" TYPE="ext4"
+UUID=7c723d58-d9e3-44a0-9eb3-a6de7dc95ffc  /ebs-disk  ext4  defaults,nofail  0  2
+```
+
+Check, if volume is mounted:
+```
+$ dh -h
+```
+
+Yo can now continue with setuping geo-replication for Gluster
+
+
+### Geo-replication
+
+```
+As of Gluster 3.5 you cannot use a folder as a geo-replication destination.  
+As of 3.5 you must replicate from one Gluster volume to another gluster volume.
+```
+
+So we need to create volume on the EC2 node.
+
+Create local domain for your Gluster on EC2 node.
+```
+$ sudo vim /etc/hosts
+```
+
+Add the record. Note: use your private IP address, not my on the next line
+```
+172.31.74.107 gluster-georep.example.com gluster0
+```
+
+Create the volume and mount it
+```
+$ sudo gluster volume create georep-volume gluster-georep.example.com:/ebs-disk/gluster/geo-replication force
+$ sudo gluster volume start georep-volume
+$ sudo gluster volume status
+$ sudo mkdir /georep-storage-pool
+$ sudo mount -t glusterfs gluster-georep.example.com:georep-volume /georep-storage-pool
+```
+Create the file and check, if is in Gluster volume
+```
+$ touch /ebs-disk/gluster/geo-replication/hi.txt
+$ cat /georep-storage-pool/hi.txt
+```
+
+Now, lets prepare root user to be able login to it. Note: as we are using special user for geo-replication,
+this should not be needed.
+
+We will allow root login - based on the article [https://linuxconfig.org/allow-ssh-root-login-on-ubuntu-20-04-focal-fossa-linux](https://linuxconfig.org/allow-ssh-root-login-on-ubuntu-20-04-focal-fossa-linux)
+```
+$ sudo vim /etc/ssh/sshd_config
+```
+
+Change
+```
+PermitRootLogin yes
+```
+Restart ssh daemon
+```
+$ sudo systemctl restart ssh
+```
+
+Allow login to Gluster from my public ip at home:
+```
+$ sudo apt-get install ufw
+
+$ sudo ufw allow from 87.244.210.58 to any port 24007
+$ sudo ufw deny 24007
+
+$ sudo ufw allow from 87.244.210.58 to any port 49152
+$ sudo ufw deny 49152
+```
+
+Dont forget to setup firewall rules also in AWS console. Go to your instance detail, and in tab click on Security
+Add this inbound rules:
+
+```
+port range | protocol | source | 
+24007 | TCP | 0.0.0.0/0
+22 | TCP | 0.0.0.0/0
+7777 | TCP | 0.0.0.0/0
+24008 | TCP | 0.0.0.0/0
+49152 | TCP | 0.0.0.0/0
+```
+
+Later, we will switch from ssh port 22 to 7777.
+
+Add your ssh key for root user and test, if you are able to connect to the root user
+```
+$ sudo vim /root/.ssh/authorized_keys # copy your id_rsa.pub here
+$ ssh root@ec2.matho.sk -p 22
+```
+
+We will prepare non-sudo user, which will be able to use geo-replication with. The whole article is at [https://docs.gluster.org/en/latest/Administrator-Guide/Geo-Replication/](https://docs.gluster.org/en/latest/Administrator-Guide/Geo-Replication/)
+On EC2 node:
+```
+$ sudo groupadd geogroup
+$ sudo useradd -G geogroup geoaccount
+$ sudo gluster-mountbroker setup /var/mountbroker-root geogroup
+$ sudo gluster-mountbroker add georep-volume geoaccount
+$ sudo gluster-mountbroker status
+```
+
+Now create the secret pem files. Login to your Gluster master node (NOT EC2 node) and run:
+```
+$ gluster-georep-sshkey generate --no-prefix
+```
+This will generate ssh keys. Print the output
+```
+$ sudo cat /var/lib/glusterd/geo-replication/common_secret.pem.pub
+```
+And insert to authorized_keys file in your ec2 node:
+```
+$ sudo vim /home/geoaccount/.ssh/authorized_keys
+```
+If there is no `/home/geoaccount/.ssh` folder, lets create it:
+```
+$ sudo mkdir -p /home/geoaccount/.ssh
+$ sudo chown geoaccount:geoaccount /home/geoaccount
+$ sudo chown geoaccount:geoaccount /home/geoaccount/.ssh
+$ sudo chmod 655 /home/geoaccount
+$ sudo chmod 700 /home/geoaccount/.ssh
+$ sudo vim /home/geoaccount/.ssh/authorized_keys
+$ sudo chmod 600 /home/geoaccount/.ssh/authorized_keys
+```
+Then,  try to login via ssh to your geoaccount user from your Gluster master node:
+```
+$ sudo ssh geoaccount@ec2.matho.sk -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
+```
+Until now, we haven't changed the ssh port, so use the default 22
+
+On your master node, add the following record to `/etc/hosts`. Insert public IP address of your EC2 node:
+```
+$ vim /etc/hosts
+
+100.25.43.108 gluster-georep.example.com
+```
+
+I'm not sure, if this is needed, but I have changed the ssh port from 22 to 7777.
+```
+$ sudo ufw allow 7777
+$ sudo vim /etc/ssh/sshd_config
+```
+```
+Port 7777
+```
+
+```
+$ sudo systemctl reload sshd
+```
+
+Check, if you can login to ec2 machine via 7777 port.
+```
+$ sudo ssh geoaccount@ec2.matho.sk -p 7777 -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
+```
+To be sure, change the port also in config file
+```
+$ sudo vim  /etc/glusterfs/glusterd.vol
+```
+
+Because I had some issues with ssh connection, I have uninstall EC2 Instance Connect.  See [https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-uninstall.html](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-uninstall.html) and [https://github.com/aws/aws-ec2-instance-connect-config/issues/19](https://github.com/aws/aws-ec2-instance-connect-config/issues/19)
+```
+$ sudo apt-get remove ec2-instance-connect
+```
+Then (not sure if it was needed)
+```
+$ sudo echo 'SSHD: ALL' >> /etc/hosts.allow
+$ sudo gluster volume set georep-volume auth.allow *
+```
+
+Create gsyncd.conf file, based on your volume names:
+```
+$ sudo mkdir -p /var/lib/glusterd/geo-replication/volume1_ec2.matho.sk_georep-volume
+$ sudo cp /etc/glusterfs/gsyncd.conf /var/lib/glusterd/geo-replication/volume1_ec2.matho.sk_georep-volume/gsyncd.conf
+```
+
+Geo-replication is using 'gsyncd’ and it should be located in `/usr/libexec/glusterfs/`. On Ubuntu this doesn’t exist. So you need to create it and make symbolic link to existing on all nodes
+On both nodes - master and ec2, run:
+```
+$ sudo mkdir -p /usr/libexec/glusterfs/     
+$ sudo ln -s /usr/lib/aarch64-linux-gnu/glusterfs/gsyncd /usr/libexec/glusterfs/gsyncd 
+```
+If you willl need log files, the log files are located at:
+```
+$ sudo cat /var/log/glusterfs/geo-replication/volume1_ec2.matho.sk_georep-volume/gsyncd.log
+$ sudo tail -n 150 /var/log/glusterfs/geo-replication/cli.log
+$ sudo cat /var/log/glusterfs/geo-replication/gverify-slavemnt.log
+$ sudo tail -n 150 /var/log/glusterfs/glusterd.log
+```
+
+The setting for Gluster are located at:
+```
+$ sudo cat /etc/glusterfs/glusterd.vol
+```
+
+Now try to login to ec2 node from your master node, via Gluster:
+```
+$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume create ssh-port 7777 push-pem
+```
+
+If it doesnt work, add `force` option
+```
+$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume create ssh-port 7777 push-pem force
+```
+Then:
+```
+$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume config remote_gsyncd /usr/lib/aarch64-linux-gnu/glusterfs/gsyncd
+```
+Start the geo-replication via:
+```
+$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume start
+```
+
+See the status via
+```
+$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume status
+```
+
+You should see status `Active`
+
+Now, the geo-replication should work. But for me it is too slow. Not sure, if it is due to slow disk, I have selected for EBS.
+I have decided to upload initial data via ssh manually and will test the synchronization speed later.
+
 ##  Summary
 Hope, you like this tutorial and I helped you a little bit :) Also there is some todo stack, which I keep at the end of this tutorial. If I find time, I will try to improve
 this tutorial continuously.
 
 ## TODO
-- upload GluserFS data to some cloud, like DigitalOcean? If all my rpis will die to have some backup in cloud?
-- postgres backups to GlusterFS
+- add info what I need to start after instance is restarted
 - scale Portainer to 2 nodes?
 - set ssl for Portainer and add DNS name, subdomain
 - mount pgadmin to my domain
@@ -1820,7 +2271,6 @@ this tutorial continuously.
 - do heavy testing of etcd, multiple situations
 - attach some images from Patroni, maybe architecture diagram
 - recheck all opened ports, if it needs to be opened
-- configure ssl for all rails websites, rebuild rails images
 - create own stack for Portainer and maybe also for Traefik
 - share gitlab data with GlusterFs
 - install Monit
@@ -1828,6 +2278,5 @@ this tutorial continuously.
 - install Traefik on node2, to be HA, share config via GlusterFS
 - allow 5432 port only for nodes <-> communication
 - ab benchmark testing, how many requests/s it is able to do
-- due to security, rebuild all my rails docker images, fork it from ubuntu 20.04
 - add info about router config (which ports needs to add, if you are behind NAT)
 - do it correctly start everything after reboot?
