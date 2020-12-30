@@ -288,6 +288,20 @@ Then from node1
 
 Try to write some files to `/storage-pool` and test, if the file sharing works correctly.
 
+You need to automount glusterfs on system boot. On the first node, write to fstab
+```
+$ sudo vim /etc/fstab
+gluster1.example.com:/volume1 /storage-pool glusterfs defaults,_netdev 0 0
+```
+
+On second node, write to fstab
+```
+$ sudo vim /etc/fstab
+gluster2.example.com:/volume1 /storage-pool glusterfs defaults,_netdev 0 0
+```
+
+Now, when you reboot your device, run `df -h` and you should see /storage-pool mount point on both of your devices.
+
 ## Docker engine
 No we will install Docker. Prerequisites you can find at [https://docs.docker.com/engine/install/ubuntu/#prerequisites](https://docs.docker.com/engine/install/ubuntu/#prerequisites)
 
@@ -2255,8 +2269,198 @@ $ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-vo
 
 You should see status `Active`
 
-Now, the geo-replication should work. But for me it is too slow. Not sure, if it is due to slow disk, I have selected for EBS.
-I have decided to upload initial data via ssh manually and will test the synchronization speed later.
+Now, the geo-replication should work.
+
+For me, it seems to be very slow. I have decided to upload initial data via ssh manually.
+But, after I have uploaded files, I have found out, that the sync started failing. So I recommend to do not upload
+data directly to ec2 server and wait until sync finish.
+
+I have found also, that during initial phase, it creates empty folders and zero-byte files and it starts
+synchronization after this phase. So do not worry, if you see zero byte length files at the beginnning.
+It takes some time until the files are synchronized.
+
+Because I have started the process multiple times, I decided to delete all content in georep volume on ec2 node and tried
+to do geo-replication again. This time via root user.
+
+After day of waiting, it seems, that the synchronization is not working correctly. It ends with empty directories.
+
+## Prometheus + Grafana vs Datadog vs Zabbix
+
+For a long time, I was searching the right solution for the infrastructure monitoring. Datadog is very nice
+solution, but the free package is not good enough for me - the alerting/monitoring section is missing
+in the free package.
+
+Another solution was Prometheus + Grafana. I give it a try, but the settings seems for me a lot complicated.
+So finally, I have decided to use Zabbix.
+
+## Zabix
+
+We will install Zabbix from docker containers. The tutorial is located at [https://www.zabbix.com/documentation/current/manual/installation/containers](https://www.zabbix.com/documentation/current/manual/installation/containers)
+Go to source code at [https://github.com/zabbix/zabbix-docker](https://github.com/zabbix/zabbix-docker) and download yaml file
+`docker-compose_v3_ubuntu_pgsql_latest.yaml`
+
+To the same folder, where is downloaded this yaml, download dot files like:
+- .env_db_pgsql
+- .env_srv
+- .env_prx
+- .env_prx_sqlite3
+- .env_db_mysql_proxy
+- .env_prx_mysql
+- .env_web
+- .env_agent
+- .env_java
+- .env_db_mysql
+- .MYSQL_PASSWORD
+- .MYSQL_ROOT_PASSWORD
+- .MYSQL_USER
+- .POSTGRES_PASSWORD
+- .POSTGRES_USER
+
+If you start the docker compose now, you will see error `ERROR: no matching manifest for linux/arm64/v8 in the manifest list entries`
+It is because that the used Mysql version from Dockerhub does not contain aarch64 image. So change the source image to:
+
+```
+mysql-server:
+ image: mysql/mysql-server:8.0.22
+```
+
+Because we have already assigned ports 80 and 443, change that also:
+
+```
+zabbix-web-apache-pgsql:
+  image: zabbix/zabbix-web-apache-pgsql:ubuntu-5.2-latest
+  ports:
+    - "8085:8080"
+    - "4435:8443"
+```
+
+Do not forget to allow this ports in firewall:
+```
+$ sudo ufw allow 8085
+$ sudo ufw allow 4435
+```
+
+Now, Zabbix will be located at `10.0.2.3:8085`  The default credentials are:
+```
+Admin:zabbix
+```
+
+Lets start Zabbix via docker compose (for now, without detached status). If you want to run it in background, add `-d` cmd switch
+```
+$ sudo docker-compose -f ./docker-compose_v3_ubuntu_pgsql_latest.yaml up
+```
+
+This will create docker volume folder in he docker compose file.
+
+Now you need to assign Zabbix host ip in Zabbix settings. Go to Portainer, select zabbix server container and click on details.
+Scroll down and you will se available networks, which this container uses. Search for backend network and copy the docker IP.
+For me , the IP was `172.16.239.7`
+
+Now go to Zabbix, login via default credentials. Navigate to configuration -> hosts and instead of 127.0.0.1
+change the ip to `172.16.239.7`. You should now see at the end of row green word ZBX and set the ip to
+`172.16.239.7:10050`
+
+Now your agent is configured and you can monitor your infrastructure.
+
+You can continue in setuping triggers (email triggers) [https://www.zabbix.com/documentation/current/manual/quickstart/trigger](https://www.zabbix.com/documentation/current/manual/quickstart/trigger)
+
+It is good to have sms notifications, in case of some serious issue. I have setup it based on this tutorial [https://github.com/ClickSend/zabbix-sms](https://github.com/ClickSend/zabbix-sms)
+The file, I'm using is
+
+```
+#!/bin/sh
+#
+# Script to send SMS alerts via Zabbix
+#
+# More information about the ClickSend API: https://developers.clicksend.com/docs/http/v2/#ClickSend-v2-API-SMS
+#
+# These lines are optional (Sending the output to a file)
+#
+#
+exec 3>&1 4>&2
+trap 'exec 2>&4 1>&3' 0 1 2 3
+exec 1>/dev/null 2>&1
+
+# Your ClickSend credentials (from https://dashboard.clicksend.com/#/account/subaccount)
+USERNAME=username
+APIKEY=apikey
+PHONE=myphone
+MESSAGE=${2}
+
+# This echo is only for my /var/run/zabbix/log/log.out script
+echo "date +%H:%M:%: Sending SMS Text to $1"
+
+#
+# Posting the SMS via HTTP API
+# 
+# NOTE: Because the Zabbix alerts have spaces/new lines, we are using the "--data-urlencode" option to encode the message.
+#
+/var/lib/zabbix/modules/curl -X POST "https://api-mapper.clicksend.com/http/v2/send.php?method=zabbix&username=$USERNAME&key=$APIKEY&to=$PHONE" --data-urlencode message="$MESSAGE"
+
+echo "date +%H:%M:%: SMS Text sent to $1"
+echo "MESSAGE: $2"
+```
+
+Change USERNAME, APIKEY and PHONE variables. I have decided to hardcode PHONE variable in the script, to allways send
+sms only to my phone number - for security issues. Also you can find the `/var/lib/zabbix/modules/curl` line.
+Because in the configured docker image, there is no curl, I have decided to copy curl to this volume from my native system and it works.
+```
+$ sudo cp /usr/bin/curl /home/ubuntu/docker/rpi_docker_compose/zbx_env/var/lib/zabbix/modules
+```
+Register account in ClickSend system, it is ready in a minute. You can go to the list of media types and trigger test sms.
+
+The docker-compose process is not started on system start. So, if system is restarted, it doesn't start the process.
+Lets add upstart script
+```
+$ sudo vim /etc/systemd/system/zabbix.service
+$ sudo chmod +x /etc/systemd/system/zabbix.service
+```
+Insert the text:
+```
+[Unit]
+Description=Docker Compose Application Service
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/ubuntu/docker/rpi_docker_compose
+ExecStart=/usr/bin/docker-compose -f ./docker-compose_v3_ubuntu_pgsql_latest.yaml up -d
+ExecStop=/usr/bin/docker-compose -f ./docker-compose_v3_ubuntu_pgsql_latest.yaml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Ensure, you have provided correct directories. Then restart daemon
+```
+$ sudo systemctl daemon-reload
+```
+
+And start the service. Also, start the service on system start
+```
+$ sudo systemctl start zabbix.service
+$ sudo systemctl enable zabbix.service
+```
+
+We also need to install agent on the second node.
+Lets run:
+```
+$ sudo docker run --name zabbix-agent -d -p 10050:10050 --restart always --privileged -e ZBX_HOSTNAME="ubuntu2" -e ZBX_SERVER_HOST="10.0.2.3" zabbix/zabbix-agent2:alpine-5.2.3
+```
+
+Not sure if needed, but lets open the firewall
+```
+$ sudo ufw allow 10050
+$ sudo ufw allow 10051
+```
+
+After it, you need to add new server in Zabbix backend. Go to Configuration > Hosts > Create host and fill in settings for IP 	10.0.2.4
+You can check detailed instruction in article [https://techexpert.tips/zabbix/zabbix-monitor-linux-using-agent/](https://techexpert.tips/zabbix/zabbix-monitor-linux-using-agent/) in the section
+Tutorial - Zabbix Monitor Linux.
+
 
 ##  Summary
 Hope, you like this tutorial and I helped you a little bit :) Also there is some todo stack, which I keep at the end of this tutorial. If I find time, I will try to improve
