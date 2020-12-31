@@ -2282,8 +2282,6 @@ It takes some time until the files are synchronized.
 Because I have started the process multiple times, I decided to delete all content in georep volume on ec2 node and tried
 to do geo-replication again. This time via root user.
 
-After day of waiting, it seems, that the synchronization is not working correctly. It ends with empty directories.
-
 ## Prometheus + Grafana vs Datadog vs Zabbix
 
 For a long time, I was searching the right solution for the infrastructure monitoring. Datadog is very nice
@@ -2461,6 +2459,9 @@ After it, you need to add new server in Zabbix backend. Go to Configuration > Ho
 You can check detailed instruction in article [https://techexpert.tips/zabbix/zabbix-monitor-linux-using-agent/](https://techexpert.tips/zabbix/zabbix-monitor-linux-using-agent/) in the section
 Tutorial - Zabbix Monitor Linux.
 
+## Using custom certificate with Traefik
+
+I have used this tutorial [https://kevinquillen.com/setting-traefik-2-local-ssl-certificate](https://kevinquillen.com/setting-traefik-2-local-ssl-certificate)
 
 ##  Summary
 Hope, you like this tutorial and I helped you a little bit :) Also there is some todo stack, which I keep at the end of this tutorial. If I find time, I will try to improve
