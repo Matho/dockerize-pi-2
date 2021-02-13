@@ -1985,131 +1985,164 @@ It is recommended to enable autostart of Minio on system start. Use the guide lo
 
 Also, if you want Minio to be available remotely, add port forwarding to your routers.
 
-## Autobackup of GlusterFS to Amazon EC2 instance
+## Autobackup of GlusterFS to DigitalOcean droplet
 
-GlusterFS contain feature called Geo-Replication. More info about it can be found at [https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50](https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50)
-Via this feature, you can autobackup your data from Gluster.
+GlusterFS contains feature called Geo-Replication. More info about it can be found at [https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50](https://medium.com/@msvbhat/distributed-geo-replication-in-glusterfs-ec95f4393c50)
+Via this feature, you can autobackup your data from Gluster cluster to droplet in another place.
 
-Go to Amazon portal and create EC2 instance. I have selected the lowest possible version - t4nano.
-It contains 512MB ram and I have selected 20GB ssd disk. Also I have created 125GB EBS volume via
-cold hdd option. It has throughput of 2/10MB per sec. After I have setup georeplication I have found
-it is very slow, so I recommend to select more performance device.
+Initially, I have prepared tutorial for Amazon EC2 instance. But the cheapest instance has cost about
+$20 per month, so I have migrated the georeplication to DigitalOcean droplet. I have bought the smallest droplet + 50GB volume.
 
-After you create EC2 instance, download the pem file. Via the pem file, you are able to login to
-EC2 instance.  
-`$ ssh -i /home/martin/rpi/aws_server_credentials/aws_server.pem ubuntu@ec2.matho.sk`
+If you want to set the geo-replication for Amazon EC2, simply go to history of this repo, to commit `9d7ad78e70fa9f` and follow the older tutorial.
 
-Then configure swapfile, for example based on this article [https://linuxize.com/post/how-to-add-swap-space-on-ubuntu-20-04/](https://linuxize.com/post/how-to-add-swap-space-on-ubuntu-20-04/)
+My cluster consist of 2 nodes with raspberry pi. Initially I thought, that the geo-replication node needs to be
+the same architecture. But it works on amd64 too. Also I thought, that the georep node needs to have more
+disk space than the master node in cluster. It is not needed. It generates warning before you start georeplication,
+but you can force it and it will synchronize also to smaller node, than your master node capacity is.
 
-Now you need to install GlusterFS. Attention! Your Gluster version must match the version you are already
-using on your Gluster. So for me, it is v 7.6. At the time of writing (28.12.2020), in the Gluster
-ppa for Ubunut, there is v7.6 missing. So I recommend to use `dpkg-repack` unix command to export
-Gluster deb packages from your current cluster and install manually.
+If you want to start with DigitalOcean, buy the smallest droplet + volume and assign volume to the droplet.
 
-Login to your master node in cluster, and use the dpkg-repack command. Instructions can be found at [http://manpages.ubuntu.com/manpages/hirsute/en/man1/dpkg-repack.1.html](http://manpages.ubuntu.com/manpages/hirsute/en/man1/dpkg-repack.1.html)
+Then you will need to install Gluster. Note: you need to have the exact version of Gluster for georeplication with
+the version you are using in cluster. For me, it is v7.6. But the problem is, that since the installation on cluster,
+the version in Ubuntu PPA has changed to v7.9 and v7.6 is no more available anywhere. `dpkg-repack` command
+will not help you, because in cluster, I'm using different architecture - aarch64. So I needed to build
+Gluster from source code.
 
+### Gluster compilation and installation
+The build instructions for Gluster on Ubuntu are located at [https://docs.gluster.org/en/latest/Developer-guide/Building-GlusterFS/](https://docs.gluster.org/en/latest/Developer-guide/Building-GlusterFS/)
+I'm using Ubuntu 20.04 LTS
+
+Download Gluster source code to your node in DO via
 ```
-$ mkdir dpkg-repack
-$ cd dpkg-repack/
-$ sudo apt install dpkg-repack
-$ sudo dpkg-repack glusterfs-server
-$ sudo dpkg-repack glusterfs-client
-$ sudo dpkg-repack glusterfs-common
-```
-Download the extracted packages and upload to your EC2 instance. Install the packages. You need to install
-it in the correct order:
-
-```
-$ sudo dpkg -i glusterfs-common_7.6-ubuntu1~focal1_arm64.deb
-$ sudo apt-get install -f
-$ sudo dpkg -i glusterfs-client_7.6-ubuntu1~focal1_arm64.deb
-$ sudo apt-get install -f
-$ sudo dpkg -i glusterfs-server_7.6-ubuntu1~focal1_arm64.deb
-$ sudo apt-get install -f
-```
-Start the Gluster on EC2 node and allow it to autostart on system startup
-```
-$ sudo systemctl start glusterd.service
-$ sudo systemctl enable glusterd.service
+$ git clone https://github.com/gluster/glusterfs.git
 ```
 
-Then you need to mount the EBS volume (disk) to your system. The instructions can be found at
-[https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html)
-This instructions was for my device, your device will have different uuid and dev point
+Go to fetched folder and checkout to your required version, for me v7.6
 ```
-$ sudo file -s /dev/nvme1n1
-$ sudo mkfs -t ext4 /dev/nvme1n1 # using ext4 instead of XfS
-$ sudo mkdir /ebs-disk
-$ sudo mount /dev/nvme1n1 /ebs-disk
+$ git checkout v7.6
 ```
 
-Now setup the fstab to be the disk automouted after restart
+Update system packages
 ```
-$ sudo cp /etc/fstab /etc/fstab.orig
+$ apt-get install update
 ```
-Add:
+
+Install required packages to be able build Gluster
 ```
-/dev/nvme1n1: UUID="7c723d58-d9e3-44a0-9eb3-a6de7dc95ffc" TYPE="ext4"
-UUID=7c723d58-d9e3-44a0-9eb3-a6de7dc95ffc  /ebs-disk  ext4  defaults,nofail  0  2
+$ sudo apt-get install make automake autoconf libtool flex bison  \
+    pkg-config libssl-dev libxml2-dev python-dev libaio-dev       \
+    libibverbs-dev librdmacm-dev libreadline-dev liblvm2-dev      \
+    libglib2.0-dev liburcu-dev libcmocka-dev libsqlite3-dev       \
+    libacl1-dev
 ```
+
+I have installed also this packages, but I'm not sure if it is really required
+```
+$ apt-get install openssl pkgconf uuid-dev zlib1g zlib1g-dev libtirpc-dev rpcbind
+```
+
+In the Gluster folder, run
+```
+$ ./autogen.sh
+```
+
+If it pass, you can run configure command. To enable geo-replication feature, you need to run
+```
+$ ./configure --enable-gnfs
+```
+
+Then you can run
+```
+$ ./configure
+```
+
+If it pass, run
+```
+$ make
+$ make install
+```
+
+After installation, I had this error [https://github.com/gluster/glusterfs/issues/1365](https://github.com/gluster/glusterfs/issues/1365)
+I have solved it via running
+```
+$ ldconfig
+```
+Then I needed to add gluster binaries to PATH.
+```
+$ vim ~/.bashrc
+```
+
+At the end of file add:
+```
+export PATH=$PATH:/usr/local/sbin
+export PATH=$PATH:/usr/local/bin
+```
+
+You should be able to restart glusterd via
+```
+$ systemctl status glusterd.service
+```
+Enable auto start of Gluster after restart
+```
+$ $ systemctl enable glusterd.service
+```
+If Gluster has started, we can continue in georeplication setup
+
+### Gluster georeplication setup
+
+You can mount volume automatically via clicking in DigitalOcean gui. If you want to mount it manually, do on your georep node (replace the volume name with your volume name)
+```
+$ sudo mkdir -p /mnt/volume_fra1_04
+$ sudo mount -o discard,defaults,noatime /dev/disk/by-id/scsi-0DO_Volume_volume-fra1-04 /mnt/volume_fra1_04
+$ sudo echo '/dev/disk/by-id/scsi-0DO_Volume_volume-fra1-04 /mnt/volume_fra1_04 ext4 defaults,nofail,discard 0 0' | sudo tee -a /etc/fstab
+```
+With the last command, you will enable automount of volume after system reboot.
 
 Check, if volume is mounted:
 ```
 $ dh -h
 ```
-
-Yo can now continue with setuping geo-replication for Gluster
-
-
-### Geo-replication
-
 ```
 As of Gluster 3.5 you cannot use a folder as a geo-replication destination.  
-As of 3.5 you must replicate from one Gluster volume to another gluster volume.
+As of 3.5 you must replicate from one Gluster volume to another Gluster volume.
 ```
-
-So we need to create volume on the EC2 node.
-
-Create local domain for your Gluster on EC2 node.
+Create local domain for your Gluster on DO node.
 ```
 $ sudo vim /etc/hosts
 ```
 
-Add the record. Note: use your private IP address, not my on the next line
+Add this record. Note: use your private IP address of DO droplet
 ```
-172.31.74.107 gluster-georep.example.com gluster0
+10.135.0.2 gluster-georep.example.com gluster0
 ```
 
-Create the volume and mount it
+Create the volume and mount it (change the volume name)
 ```
-$ sudo gluster volume create georep-volume gluster-georep.example.com:/ebs-disk/gluster/geo-replication force
+
+$ sudo gluster volume create georep-volume gluster-georep.example.com:/mnt/volume_fra1_04/gluster/geo-replication force
 $ sudo gluster volume start georep-volume
 $ sudo gluster volume status
 $ sudo mkdir /georep-storage-pool
 $ sudo mount -t glusterfs gluster-georep.example.com:georep-volume /georep-storage-pool
 ```
-Create the file and check, if is in Gluster volume
+
+Create the file and check, if it is saved to Gluster volume
 ```
-$ touch /ebs-disk/gluster/geo-replication/hi.txt
+$ touch /mnt/volume_fra1_04/gluster/geo-replication/hi.txt
 $ cat /georep-storage-pool/hi.txt
 ```
+Add to your /etc/fstab automount command for Gluster volume
+```
+$ sudo vim /etc/fstab
+```
+and add
+```
+gluster-georep.example.com:georep-volume /georep-storage-pool glusterfs defaults,_netdev 0 0
+```
 
-Now, lets prepare root user to be able login to it. Note: as we are using special user for geo-replication,
-this should not be needed.
+Reboot your droplet. The disk volume should be automounted and Gluster volume should be auto started.
 
-We will allow root login - based on the article [https://linuxconfig.org/allow-ssh-root-login-on-ubuntu-20-04-focal-fossa-linux](https://linuxconfig.org/allow-ssh-root-login-on-ubuntu-20-04-focal-fossa-linux)
-```
-$ sudo vim /etc/ssh/sshd_config
-```
-
-Change
-```
-PermitRootLogin yes
-```
-Restart ssh daemon
-```
-$ sudo systemctl restart ssh
-```
+Now, setup ufw firewall
 
 Allow login to Gluster from my public ip at home:
 ```
@@ -2120,39 +2153,19 @@ $ sudo ufw deny 24007
 
 $ sudo ufw allow from 87.244.210.58 to any port 49152
 $ sudo ufw deny 49152
-```
 
-Dont forget to setup firewall rules also in AWS console. Go to your instance detail, and in tab click on Security
-Add this inbound rules:
+$ sudo ufw allow 22
+$ sudo ufw allow 7777
+$ sudo ufw allow 24008
+```
+Later, we will switch from ssh port 22 to 7777. During DO creation phase, I expect you have assigned your ssh public key, so I expect you are able to login already
+to your DO droplet via ssh keys.
 
-```
-port range | protocol | source | 
-24007 | TCP | 0.0.0.0/0
-22 | TCP | 0.0.0.0/0
-7777 | TCP | 0.0.0.0/0
-24008 | TCP | 0.0.0.0/0
-49152 | TCP | 0.0.0.0/0
-```
+Now, we should prepare `geoaccount` user. It means, that we will not sync files to root user on georep node, but to geoaccount. The problem is,
+that I had issues with running `gluster-mountbroker` command after Gluster was builed. It seems, that the command wasn't build. So I'm skipping this phase for now. If you want to try to setup `gluster-mountbroker` , switch in
+this git history for georeplication tutorial with AWS EC2.
 
-Later, we will switch from ssh port 22 to 7777.
-
-Add your ssh key for root user and test, if you are able to connect to the root user
-```
-$ sudo vim /root/.ssh/authorized_keys # copy your id_rsa.pub here
-$ ssh root@ec2.matho.sk -p 22
-```
-
-We will prepare non-sudo user, which will be able to use geo-replication with. The whole article is at [https://docs.gluster.org/en/latest/Administrator-Guide/Geo-Replication/](https://docs.gluster.org/en/latest/Administrator-Guide/Geo-Replication/)
-On EC2 node:
-```
-$ sudo groupadd geogroup
-$ sudo useradd -G geogroup geoaccount
-$ sudo gluster-mountbroker setup /var/mountbroker-root geogroup
-$ sudo gluster-mountbroker add georep-volume geoaccount
-$ sudo gluster-mountbroker status
-```
-
-Now create the secret pem files. Login to your Gluster master node (NOT EC2 node) and run:
+Now create the secret pem files. Login to your Gluster master node (NOT DO node) and run:
 ```
 $ gluster-georep-sshkey generate --no-prefix
 ```
@@ -2160,34 +2173,24 @@ This will generate ssh keys. Print the output
 ```
 $ sudo cat /var/lib/glusterd/geo-replication/common_secret.pem.pub
 ```
-And insert to authorized_keys file in your ec2 node:
+And insert to authorized_keys file in your DO node:
 ```
-$ sudo vim /home/geoaccount/.ssh/authorized_keys
+$ sudo vim /root/.ssh/authorized_keys
 ```
-If there is no `/home/geoaccount/.ssh` folder, lets create it:
+
+Then,  try to login via ssh to your root user from your Gluster master node:
 ```
-$ sudo mkdir -p /home/geoaccount/.ssh
-$ sudo chown geoaccount:geoaccount /home/geoaccount
-$ sudo chown geoaccount:geoaccount /home/geoaccount/.ssh
-$ sudo chmod 655 /home/geoaccount
-$ sudo chmod 700 /home/geoaccount/.ssh
-$ sudo vim /home/geoaccount/.ssh/authorized_keys
-$ sudo chmod 600 /home/geoaccount/.ssh/authorized_keys
-```
-Then,  try to login via ssh to your geoaccount user from your Gluster master node:
-```
-$ sudo ssh geoaccount@ec2.matho.sk -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
+$ sudo ssh root@georep.matho.sk -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
 ```
 Until now, we haven't changed the ssh port, so use the default 22
 
-On your master node, add the following record to `/etc/hosts`. Insert public IP address of your EC2 node:
+On your master node, add the following record to `/etc/hosts`. Insert public IP address of your DO node:
 ```
 $ vim /etc/hosts
 
-100.25.43.108 gluster-georep.example.com
+207.154.217.167 gluster-georep.example.com
 ```
-
-I'm not sure, if this is needed, but I have changed the ssh port from 22 to 7777.
+I have changed the ssh port from 22 to 7777.
 ```
 $ sudo ufw allow 7777
 $ sudo vim /etc/ssh/sshd_config
@@ -2200,40 +2203,44 @@ Port 7777
 $ sudo systemctl reload sshd
 ```
 
-Check, if you can login to ec2 machine via 7777 port.
+Check, if you can login to DO machine via 7777 port.
 ```
-$ sudo ssh geoaccount@ec2.matho.sk -p 7777 -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
+$ sudo ssh root@georep.matho.sk -p 7777 -oPasswordAuthentication=no -oStrictHostKeyChecking=no -i /var/lib/glusterd/geo-replication/secret.pem
 ```
 To be sure, change the port also in config file
 ```
 $ sudo vim  /etc/glusterfs/glusterd.vol
 ```
 
-Because I had some issues with ssh connection, I have uninstall EC2 Instance Connect.  See [https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-uninstall.html](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-uninstall.html) and [https://github.com/aws/aws-ec2-instance-connect-config/issues/19](https://github.com/aws/aws-ec2-instance-connect-config/issues/19)
-```
-$ sudo apt-get remove ec2-instance-connect
-```
 Then (not sure if it was needed)
 ```
 $ sudo echo 'SSHD: ALL' >> /etc/hosts.allow
 $ sudo gluster volume set georep-volume auth.allow *
 ```
 
-Create gsyncd.conf file, based on your volume names:
+Create gsyncd.conf file on your master node, based on your volume names:
 ```
-$ sudo mkdir -p /var/lib/glusterd/geo-replication/volume1_ec2.matho.sk_georep-volume
-$ sudo cp /etc/glusterfs/gsyncd.conf /var/lib/glusterd/geo-replication/volume1_ec2.matho.sk_georep-volume/gsyncd.conf
+$ sudo mkdir -p /var/lib/glusterd/geo-replication/volume1_georep.matho.sk_georep-volume
+$ sudo cp /etc/glusterfs/gsyncd.conf /var/lib/glusterd/geo-replication/volume1_georep.matho.sk_georep-volume/gsyncd.conf
 ```
 
-Geo-replication is using 'gsyncd’ and it should be located in `/usr/libexec/glusterfs/`. On Ubuntu this doesn’t exist. So you need to create it and make symbolic link to existing on all nodes
-On both nodes - master and ec2, run:
+Geo-replication is using 'gsyncd’ and it should be located in `/usr/libexec/glusterfs/`.
+On Ubuntu this doesn’t exist. So you need to create it and make symbolic link
+On master node, run:
 ```
 $ sudo mkdir -p /usr/libexec/glusterfs/     
 $ sudo ln -s /usr/lib/aarch64-linux-gnu/glusterfs/gsyncd /usr/libexec/glusterfs/gsyncd 
 ```
-If you willl need log files, the log files are located at:
+
+On DigitalOcean node run:
 ```
-$ sudo cat /var/log/glusterfs/geo-replication/volume1_ec2.matho.sk_georep-volume/gsyncd.log
+$ sudo mkdir -p /usr/libexec/glusterfs/     
+$ sudo ln -s /usr/local/libexec/glusterfs/gsyncd /usr/libexec/glusterfs/gsyncd 
+```
+
+If you will need log files, the log files are located at (master node)
+```
+$ sudo cat /var/log/glusterfs/geo-replication/volume1_georep.matho.sk_georep-volume/gsyncd.log
 $ sudo tail -n 150 /var/log/glusterfs/geo-replication/cli.log
 $ sudo cat /var/log/glusterfs/geo-replication/gverify-slavemnt.log
 $ sudo tail -n 150 /var/log/glusterfs/glusterd.log
@@ -2244,43 +2251,33 @@ The setting for Gluster are located at:
 $ sudo cat /etc/glusterfs/glusterd.vol
 ```
 
-Now try to login to ec2 node from your master node, via Gluster:
+Now try to login to DO node from your master node, via Gluster:
 ```
-$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume create ssh-port 7777 push-pem
+$ sudo gluster volume geo-replication volume1 root@georep.matho.sk::georep-volume create ssh-port 7777 push-pem
 ```
 
-If it doesnt work, add `force` option
+If your disk volume size on DO droplet is less than your master node, it will print error. Don't worry, simply enter force command, it will work
 ```
-$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume create ssh-port 7777 push-pem force
+$ sudo gluster volume geo-replication volume1 root@georep.matho.sk::georep-volume create ssh-port 7777 push-pem force
 ```
-Then:
-```
-$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume config remote_gsyncd /usr/lib/aarch64-linux-gnu/glusterfs/gsyncd
-```
+
 Start the geo-replication via:
 ```
-$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume start
+$ sudo gluster volume geo-replication volume1 root@georep.matho.sk::georep-volume start
 ```
 
 See the status via
 ```
-$ sudo gluster volume geo-replication volume1 geoaccount@ec2.matho.sk::georep-volume status
+$ sudo gluster volume geo-replication volume1 root@georep.matho.sk::georep-volume status
 ```
 
 You should see status `Active`
 
 Now, the geo-replication should work.
 
-For me, it seems to be very slow. I have decided to upload initial data via ssh manually.
-But, after I have uploaded files, I have found out, that the sync started failing. So I recommend to do not upload
-data directly to ec2 server and wait until sync finish.
-
-I have found also, that during initial phase, it creates empty folders and zero-byte files and it starts
-synchronization after this phase. So do not worry, if you see zero byte length files at the beginnning.
+I have found, that during initial phase, it creates empty folders and zero-byte files and it starts
+synchronization after this phase. So do not worry, if you see zero byte length files at the beginning.
 It takes some time until the files are synchronized.
-
-Because I have started the process multiple times, I decided to delete all content in georep volume on ec2 node and tried
-to do geo-replication again. This time via root user.
 
 ## Prometheus + Grafana vs Datadog vs Zabbix
 
