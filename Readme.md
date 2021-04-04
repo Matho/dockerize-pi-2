@@ -1,6 +1,6 @@
 # How to run Rails apps with Docker Swarm, GlusterFS, Traefik, PostgreSQL, Patroni, Etcd, Haproxy, PgBouncer, Portainer in HA on Raspberry Pi 4
 
-Read time: 70 minutes
+Read time: 80 minutes
 
 ## Intro
 Year ago I have written article `How to run Rails apps with Docker on Raspberry Pi 4` located at
@@ -2460,6 +2460,224 @@ Tutorial - Zabbix Monitor Linux.
 
 I have used this tutorial [https://kevinquillen.com/setting-traefik-2-local-ssl-certificate](https://kevinquillen.com/setting-traefik-2-local-ssl-certificate)
 
+## Gitlab Pipelines
+
+I'm using Gitlab instance, which is hosted in Websupport. Websupport do not support pipeline runners, you need to host runners on your system.
+
+We will install runner on rpi with 4GB ram, as there is not so many services running, like on rpi with 8GB ram.
+
+The page with installation instructions is located at [https://docs.gitlab.com/runner/install/linux-repository.html](https://docs.gitlab.com/runner/install/linux-repository.html)
+```
+$ curl -L "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | sudo bash
+$ export GITLAB_RUNNER_DISABLE_SKEL=true; sudo -E apt-get install gitlab-runner
+```
+Now we need to register runner. Instructions are located at [https://docs.gitlab.com/runner/register/index.html](https://docs.gitlab.com/runner/register/index.html)
+I have selected project specific runner.
+```
+$ sudo gitlab-runner register
+```
+You need to answer some questions. Navigate in the Gitlab to your project, in left menu to Settings, then to CI/CD and expand the runners section. Now copy the url and token under the `Set up a specific runner manually`
+When you are asked for tags, enter: `build,deploy`. Now your runner should be running.
+
+We need to configure the runner. Open
+```
+$ sudo vim /etc/gitlab-runner/config.toml
+```
+And change the priviledge to `true`. Under the key value priviledge, add:
+```
+extra_hosts = ["registry.docker.matho.sk:10.0.2.3"]
+```
+
+This means, that the started docker in runner will understand the registry url and will try to connect to 10.0.2.3 IP for docker registry.
+
+Also change the gitlab-runner user permissions:
+```
+$ sudo usermod -aG docker gitlab-runner 
+$ sudo -u gitlab-runner -H docker info 
+```
+You should see docker info. Because we have changed the configuration, we will need to restart service
+```
+$ sudo systemctl restart gitlab-runner.service
+$ sudo systemctl status gitlab-runner.service
+```
+Check, if runner has correctly started.
+
+### .gitlab-ci.yml
+
+We have used this config. The file is located in your rails project, in the root `.gitlab-ci.yml`
+
+```yaml
+stages:
+  - build
+
+build-master:
+  stage: build
+  image: registry.docker.matho.sk:6000/docker-gitlab-pipelines-aarch64:latest
+  tags:
+    - build
+  variables:
+    DEPLOY_ENV: production
+    RAILS_ENV: production
+  script:
+    - ruby ./bin/build.docker.rb
+  timeout: 180 minutes
+  only:
+    - master
+```
+As you can see, the base image is `docker-gitlab-pipelines-aarch64:latest` We need to create this image first. Create project in Gitlab, name it `docker-gitlab-pipelines-aarch64`
+Prepare new Dockerfile inside the project.
+
+```
+vim Dockerfile
+```
+The content is:
+
+```
+# Pull base image
+FROM ubuntu:20.04 
+
+MAINTAINER Martin Markech <martin.markech@matho.sk>
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		bzip2 \
+		ca-certificates \
+		curl \
+		libffi-dev \
+		libssl-dev \
+		libyaml-dev \
+		procps \
+		zlib1g-dev \
+                git \                
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \ 
+    && apt-get install -y \
+    apt-transport-https \
+    gnupg \
+    lsb-release
+
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+RUN echo \
+  "deb [arch=arm64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+RUN apt-get update
+
+RUN apt-get install -y docker-ce docker-ce-cli containerd.io
+
+ENV RUBY_MAJOR 2.7
+ENV RUBY_VERSION 2.7.2
+ENV RUBY_DOWNLOAD_SHA256 6e5706d0d4ee4e1e2f883db9d768586b4d06567debea353c796ec45e8321c3d4 
+
+# some of ruby's build scripts are written in ruby
+# we purge this later to make sure our final image uses what we just built
+RUN buildDeps=' \
+		autoconf \
+		bison \
+		gcc \
+		libbz2-dev \
+		libgdbm-dev \
+		libglib2.0-dev \
+		libncurses-dev \
+		libreadline-dev \
+		libxml2-dev \
+		libxslt-dev \
+		make \
+		ruby \
+	' \
+	&& set -x \
+	&& apt-get update \
+	&& apt-get install -y --no-install-recommends $buildDeps \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& mkdir -p /usr/src/ruby \
+	&& curl -fSL -o ruby.tar.gz "http://cache.ruby-lang.org/pub/ruby/$RUBY_MAJOR/ruby-$RUBY_VERSION.tar.gz" \
+	&& echo "$RUBY_DOWNLOAD_SHA256 *ruby.tar.gz" | sha256sum -c - \
+	&& tar -xzf ruby.tar.gz -C /usr/src/ruby --strip-components=1 \
+	&& rm ruby.tar.gz \
+	&& cd /usr/src/ruby \
+	&& autoconf \
+	&& ./configure --disable-install-doc \
+	&& make -j"$(nproc)" \
+	&& make install \
+	&& rm -r /usr/src/ruby \
+	&& apt-get purge -y --auto-remove $buildDeps
+
+# skip installing gem documentation
+RUN echo 'gem: --no-rdoc --no-ri' >> /.gemrc
+
+# install things globally, for great justice
+ENV GEM_HOME /usr/local/bundle
+ENV PATH $GEM_HOME/bin:$PATH
+RUN gem install bundler \
+  && bundle config --global path "$GEM_HOME" \
+  && bundle config --global bin "$GEM_HOME/bin"
+
+RUN apt-get update && apt-get install -y systemd
+
+# don't create ".bundle" in all our apps
+ENV BUNDLE_APP_CONFIG $GEM_HOME
+
+CMD [ "irb" ]
+```
+Pull the git repo to rpi. Build and push to docker registry
+```
+$ sudo docker build -t registry.docker.matho.sk:6000/docker-gitlab-pipelines-aarch64:latest .
+$ sudo docker push registry.docker.matho.sk:6000/docker-gitlab-pipelines-aarch64:latest
+```
+
+Now we have base image with Docker and Ruby installed inside. We can continue.
+
+
+Create file `bin/build.docker.rb` in your rails project. You need to provide `gitlab_readonly_token` value. Go to your Gitlab project settings and navigate to section `deploy tokens`. Create new pair and insert in the following code
+
+```ruby
+#!/usr/bin/env ruby
+
+# Execute system command or exit if it fails
+def execute!(command)
+  system(command) || exit(1)
+end
+
+current_folder = Time.now.to_i
+folder_path = "/home/gitlab-runner/docker-gitlab-builds/gymplaci/#{current_folder}"
+# TODO modify this 2 values
+gitlab_readonly_user = 'gitlab-deploy-token-1'
+gitlab_readonly_token =  "YOUR-PASS-HERE"
+
+execute!( 'mkdir -p /etc/docker')
+execute!('touch /etc/docker/daemon.json')
+execute!('echo \'{ "insecure-registries": [ "127.0.0.0/8", "registry.docker.matho.sk:6000" ], "storage-driver": "vfs" }\' > /etc/docker/daemon.json')
+execute!( 'cat /etc/docker/daemon.json')
+execute!( 'service docker stop')
+execute!( 'service docker start')
+execute!( 'service docker status')
+execute!( 'docker info')
+
+execute!("git clone https://#{gitlab_readonly_user}:#{gitlab_readonly_token}@gitlab.websupport.sk/matho/gymplaci.git #{folder_path}")
+puts "git clone done"
+
+execute!("docker build --build-arg RAILS_ENV=production -t registry.docker.matho.sk:6000/gymplaci:latest #{folder_path}")
+puts "build done"
+
+execute!('docker push registry.docker.matho.sk:6000/gymplaci:latest')
+puts "push completed"
+
+puts "FINISHED"
+
+```
+
+Commit your changes. When you push to master branch, the Gitlab pipelines should be started and your new build will be prepared.
+
+Note: We have only automate the build process, not the deploy. The deploy process is little complicated as `docker stack deploy` will not work from inside docker-in-docker (Gitlab pipeline)
+So I'm skipping this section. You can deploy manually via cmdline or via Portainer easily.
+
+Note 2: The build process is very slow. It took 105 minutes to build the image. Probably it is because of docker-in-docker and vfs driver. I tried to use overlay2 or overlay or aufs driver, but the
+only one which was working was the vfs driver.
+
 ##  Summary
 Hope, you like this tutorial and I helped you a little bit :) Also there is some todo stack, which I keep at the end of this tutorial. If I find time, I will try to improve
 this tutorial continuously.
@@ -2475,7 +2693,6 @@ this tutorial continuously.
 - recheck all opened ports, if it needs to be opened
 - create own stack for Portainer and maybe also for Traefik
 - share gitlab data with GlusterFs
-- install Monit
 - install open vpn
 - install Traefik on node2, to be HA, share config via GlusterFS
 - allow 5432 port only for nodes <-> communication
